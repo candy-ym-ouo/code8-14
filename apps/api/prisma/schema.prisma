@@ -49,6 +49,11 @@ enum ActivityAction {
   COMPLETED
 }
 
+enum SnapshotEventKind {
+  CHANGE
+  ROLLBACK
+}
+
 model User {
   id           String      @id @default(uuid()) @db.Uuid
   email        String      @unique @db.VarChar(320)
@@ -65,6 +70,9 @@ model User {
   rereadMarks       RereadMark[]
   reflections       CompletionReflection[]
   activityEvents    ActivityEvent[]
+  snapshotHeads     TraceSnapshotHead[]
+  snapshotEvents    TraceSnapshotEvent[]
+  traceSnapshots    TraceSnapshot[]
 
   @@map("users")
 }
@@ -104,6 +112,9 @@ model Book {
   rereadMarks   RereadMark[]
   reflections   CompletionReflection[]
   activityEvents ActivityEvent[]
+  snapshotHead  TraceSnapshotHead?
+  snapshotEvents TraceSnapshotEvent[]
+  traceSnapshots TraceSnapshot[]
 
   @@index([userId, deletedAt, updatedAt])
   @@index([userId, status])
@@ -208,4 +219,61 @@ model ActivityEvent {
   @@index([userId, bookId, occurredAt])
   @@index([userId, entityType, occurredAt])
   @@map("activity_events")
+}
+
+// 每本书一个快照头：headSeq 是事件发号器，version 用于回滚的并发校验（CAS）。
+// 事务内更新本行即获得行锁，序列化同一本书的并发写入与并发回滚。
+model TraceSnapshotHead {
+  bookId    String   @id @map("book_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  headSeq   Int      @default(0) @map("head_seq")
+  version   Int      @default(1)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  book Book @relation(fields: [bookId], references: [id], onDelete: Restrict)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@map("trace_snapshot_heads")
+}
+
+// 追加式事件日志：回滚不删除历史事件，而是追加 ROLLBACK 事件，
+// 因此 (bookId, seq) 始终连续无空洞，任意历史位置都可重放复算。
+model TraceSnapshotEvent {
+  id          String            @id @default(uuid()) @db.Uuid
+  bookId      String            @map("book_id") @db.Uuid
+  userId      String            @map("user_id") @db.Uuid
+  seq         Int
+  kind        SnapshotEventKind
+  payloadJson Json              @map("payload_json")
+  occurredAt  DateTime          @default(now()) @map("occurred_at") @db.Timestamptz(3)
+
+  book Book @relation(fields: [bookId], references: [id], onDelete: Restrict)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([bookId, seq])
+  @@index([userId, occurredAt])
+  @@map("trace_snapshot_events")
+}
+
+// 快照只保存与上一快照的差异（deltaJson），完整文档通过差异链复算。
+// 每次回滚都会在回滚事件位置落一张快照，保证「最近快照之后的区间」
+// 不再包含 ROLLBACK 事件，区间重放无需处理回滚语义。
+model TraceSnapshot {
+  id          String   @id @default(uuid()) @db.Uuid
+  bookId      String   @map("book_id") @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  seq         Int
+  eventSeq    Int      @map("event_seq")
+  headVersion Int      @map("head_version")
+  label       String?  @db.VarChar(200)
+  stateHash   String   @map("state_hash") @db.Char(64)
+  deltaJson   Json     @map("delta_json")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  book Book @relation(fields: [bookId], references: [id], onDelete: Restrict)
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([bookId, seq])
+  @@index([bookId, eventSeq])
+  @@map("trace_snapshots")
 }

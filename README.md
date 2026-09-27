@@ -94,6 +94,31 @@ npm run dev
 - 书目和痕迹使用 `version` 防止多端写入覆盖。
 - 所有查询强制带 `userId` 条件，越权资源统一返回 404。
 
+## 痕迹版本快照
+
+每本书的页面痕迹（折角、批注、重读记录）构成一个版本化文档，支持快照、差异保存与按时间回滚。
+
+- **事件序列**：每本书一条只追加的事件日志（`trace_snapshot_events`，`(book_id, seq)` 唯一）。`trace_snapshot_heads` 行是发号器，事务内的行锁保证 `seq` 连续无空洞；事务回滚不消耗序号。
+- **差异保存**：快照不存全量文档，只存与上一快照的差异（`delta_json`）。完整文档由差异链复算得到。
+- **按时间回滚**：`POST /books/:bookId/trace-snapshots/rollback` 支持 `snapshotSeq`、`eventSeq`、`targetTime` 三种目标。回滚把业务表恢复到目标位置的状态（软删除保证历史行可恢复）。
+- **并发回滚版本校验**：回滚必须携带 `expectedVersion`，在事务内对快照头做 CAS；并发回滚只有一个成功，失败方收到 `409 STALE_WRITE`，读取新版本后可重试。
+- **恢复后序列连续**：回滚不删除历史事件，而是追加 `ROLLBACK` 事件占据下一个 `seq`，并在该位置落一张 restore-point 快照；恢复后的新变更继续递增序号。
+- **旧快照可复算**：任意快照可由「差异链」和「事件流重放」两条独立路径复算，`GET .../trace-snapshots/:seq/verify` 比对两者与存储哈希。回滚位置的锚定快照保证区间重放不会跨越回滚事件。
+
+接口一览（均需登录，书不属于当前用户时返回 404）：
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `GET /books/:bookId/trace-snapshots` | 快照列表与当前快照头（`headSeq`、`version`） |
+| `POST /books/:bookId/trace-snapshots` | 手动创建快照，可带 `label` |
+| `GET /books/:bookId/trace-snapshots/head` | 当前快照头，用于获取回滚所需版本号 |
+| `GET /books/:bookId/trace-snapshots/state?eventSeq=&time=&snapshotSeq=` | 预览某个历史位置的文档，不回滚 |
+| `POST /books/:bookId/trace-snapshots/rollback` | 回滚到目标位置，需 `expectedVersion` |
+| `GET /books/:bookId/trace-snapshots/:seq` | 快照详情与差异链复算出的文档 |
+| `GET /books/:bookId/trace-snapshots/:seq/verify` | 双路径复算校验 |
+
+完成感受（`CompletionReflection`）有独立的 `completion_round` 语义，不纳入快照文档。
+
 ## 常用命令
 
 ```bash
@@ -121,6 +146,13 @@ npm run build
 
 ```bash
 npm test
+```
+
+快照模块另有需要 PostgreSQL 的集成测试（默认跳过），覆盖事件序列连续性、并发回滚版本校验与旧快照复算：
+
+```bash
+cd apps/api
+RUN_SNAPSHOT_DB_TESTS=1 DATABASE_URL=... npx vitest run tests/
 ```
 
 端到端测试需要 PostgreSQL、API 和 Web 已可运行：

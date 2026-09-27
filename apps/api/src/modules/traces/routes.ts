@@ -7,6 +7,7 @@ import { AppError, zodFields } from '../../lib/errors.js';
 import { currentUser, requireAuth } from '../../lib/auth.js';
 import { isRestoreWindowOpen, normalizeText, validatePageRange, validateSinglePage } from '../../lib/domain.js';
 import { writeEvent } from '../../lib/events.js';
+import { recordChanges } from '../snapshots/service.js';
 import { optionalDate, paginationFromQuery, parseId } from '../../lib/http.js';
 
 const optionalReason = (max: number) =>
@@ -222,6 +223,13 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
           action: 'CREATED',
           payload: { pageNumber: created.pageNumber, reason: eventSummary(created.reason) }
         });
+        await recordChanges(tx, {
+          userId,
+          bookId,
+          changes: [
+            { entity: 'dogEars', entityId: created.id, op: 'upsert', after: { pageNumber: created.pageNumber, reason: created.reason } }
+          ]
+        });
         return created;
       });
       return reply.status(201).send({ dogEar: serializeDogEar(dogEar) });
@@ -276,7 +284,15 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         action: 'UPDATED',
         payload: { pageNumber: nextPage, reason: eventSummary(nextReason) }
       });
-      return tx.dogEar.findUniqueOrThrow({ where: { id } });
+      const updated = await tx.dogEar.findUniqueOrThrow({ where: { id } });
+      await recordChanges(tx, {
+        userId,
+        bookId: existing.bookId,
+        changes: [
+          { entity: 'dogEars', entityId: id, op: 'upsert', after: { pageNumber: updated.pageNumber, reason: updated.reason } }
+        ]
+      });
+      return updated;
     });
     return { dogEar: serializeDogEar(updated) };
   });
@@ -302,6 +318,11 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         entityId: id,
         action: 'DELETED',
         payload: { pageNumber: existing.pageNumber }
+      });
+      await recordChanges(tx, {
+        userId,
+        bookId: existing.bookId,
+        changes: [{ entity: 'dogEars', entityId: id, op: 'remove' }]
       });
     });
     return reply.status(204).send();
@@ -333,6 +354,13 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         action: 'RESTORED',
         payload: { pageNumber: value.pageNumber }
       });
+      await recordChanges(tx, {
+        userId,
+        bookId: value.bookId,
+        changes: [
+          { entity: 'dogEars', entityId: id, op: 'upsert', after: { pageNumber: value.pageNumber, reason: value.reason } }
+        ]
+      });
       return value;
     });
     return { dogEar: serializeDogEar(restored) };
@@ -363,6 +391,18 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         entityId: created.id,
         action: 'CREATED',
         payload: { startPage: created.startPage, endPage: created.endPage, summary: eventSummary(created.content) }
+      });
+      await recordChanges(tx, {
+        userId,
+        bookId,
+        changes: [
+          {
+            entity: 'annotations',
+            entityId: created.id,
+            op: 'upsert',
+            after: { startPage: created.startPage, endPage: created.endPage, content: created.content }
+          }
+        ]
       });
       return created;
     });
@@ -402,7 +442,20 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         action: 'UPDATED',
         payload: { startPage, endPage }
       });
-      return tx.annotation.findUniqueOrThrow({ where: { id } });
+      const updated = await tx.annotation.findUniqueOrThrow({ where: { id } });
+      await recordChanges(tx, {
+        userId,
+        bookId: existing.bookId,
+        changes: [
+          {
+            entity: 'annotations',
+            entityId: id,
+            op: 'upsert',
+            after: { startPage: updated.startPage, endPage: updated.endPage, content: updated.content }
+          }
+        ]
+      });
+      return updated;
     });
     return { annotation: serializeAnnotation(updated) };
   });
@@ -429,6 +482,11 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         action: 'DELETED',
         payload: { startPage: existing.startPage, endPage: existing.endPage }
       });
+      await recordChanges(tx, {
+        userId,
+        bookId: existing.bookId,
+        changes: [{ entity: 'annotations', entityId: id, op: 'remove' }]
+      });
     });
     return reply.status(204).send();
   });
@@ -454,6 +512,18 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         entityId: id,
         action: 'RESTORED',
         payload: { startPage: value.startPage, endPage: value.endPage }
+      });
+      await recordChanges(tx, {
+        userId,
+        bookId: value.bookId,
+        changes: [
+          {
+            entity: 'annotations',
+            entityId: id,
+            op: 'upsert',
+            after: { startPage: value.startPage, endPage: value.endPage, content: value.content }
+          }
+        ]
       });
       return value;
     });
@@ -484,6 +554,13 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         entityId: created.id,
         action: 'CREATED',
         payload: { pageNumber: created.pageNumber, reason: eventSummary(created.reason) }
+      });
+      await recordChanges(tx, {
+        userId,
+        bookId,
+        changes: [
+          { entity: 'rereadMarks', entityId: created.id, op: 'upsert', after: { pageNumber: created.pageNumber, reason: created.reason } }
+        ]
       });
       return created;
     });
@@ -523,7 +600,15 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         action: 'UPDATED',
         payload: { pageNumber, reason: eventSummary(reason) }
       });
-      return tx.rereadMark.findUniqueOrThrow({ where: { id } });
+      const updated = await tx.rereadMark.findUniqueOrThrow({ where: { id } });
+      await recordChanges(tx, {
+        userId,
+        bookId: existing.bookId,
+        changes: [
+          { entity: 'rereadMarks', entityId: id, op: 'upsert', after: { pageNumber: updated.pageNumber, reason: updated.reason } }
+        ]
+      });
+      return updated;
     });
     return { rereadMark: serializeRereadMark(updated) };
   });
@@ -550,6 +635,11 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         action: 'DELETED',
         payload: { pageNumber: existing.pageNumber }
       });
+      await recordChanges(tx, {
+        userId,
+        bookId: existing.bookId,
+        changes: [{ entity: 'rereadMarks', entityId: id, op: 'remove' }]
+      });
     });
     return reply.status(204).send();
   });
@@ -575,6 +665,13 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         entityId: id,
         action: 'RESTORED',
         payload: { pageNumber: value.pageNumber }
+      });
+      await recordChanges(tx, {
+        userId,
+        bookId: value.bookId,
+        changes: [
+          { entity: 'rereadMarks', entityId: id, op: 'upsert', after: { pageNumber: value.pageNumber, reason: value.reason } }
+        ]
       });
       return value;
     });
