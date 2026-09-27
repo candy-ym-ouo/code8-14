@@ -82,16 +82,34 @@ npm run dev
 7. 标记读完并保存 1 至 3 个情绪标签与文字；
 8. 在书目详情和全局时间线回看变化；
 9. 导出不含密码和会话信息的 JSON 档案；
-10. 删除痕迹后 24 小时内可撤销。
+10. 删除痕迹后 24 小时内可撤销；
+11. 痕迹每次变更追加差异快照，可按时间回滚，历史版本随时复算。
+
+## 痕迹版本快照与回滚
+
+折角、批注、重读页的每次创建、修改、删除、恢复（含删书级联）都会在同一事务中追加一条 `TraceSnapshot`：
+
+- 快照只存与上一版本的**差异**（首版本存全量），同一痕迹的快照按实体 `version` 构成连续链条；
+- 每条快照带 `stateHash`（全量状态的 SHA-256），任意历史版本都能从链首逐条复算并校验，篡改或断链会被拒绝；
+- 回滚不改写历史：按 `targetTime` 定位当时的快照、复算出状态后，作为**新版本**追加到链尾，并写入 `ROLLED_BACK` 事件，事件序列只增不减；
+- 回滚必须携带当前 `version` 做乐观并发校验，行锁（`SELECT ... FOR UPDATE`）保证并发回滚只有一个成功，其余收到 `409 STALE_WRITE`；
+- 功能上线前已存在的痕迹，在首次变更时自动补一条全量基线快照，基线之前的时间不可回滚。
+
+接口：
+
+- `GET /api/v1/traces/:entityType/:entityId/snapshots` — 快照链（`entityType` 为 `DOG_EAR` / `ANNOTATION` / `REREAD_MARK`）；
+- `GET /api/v1/traces/:entityType/:entityId/snapshots/:version/state` — 复算指定版本的全量状态并校验哈希；
+- `POST /api/v1/traces/:entityType/:entityId/rollback` — 按时间回滚，请求体 `{ "targetTime": "<ISO 时间>", "version": <当前版本号> }`。
 
 ## 数据一致性
 
 - 所有写操作通过 Prisma 事务完成。
-- 业务对象与 `ActivityEvent` 在同一事务中提交。
+- 业务对象、`ActivityEvent` 与 `TraceSnapshot` 在同一事务中提交。
 - 删除采用软删除，删除历史不回抹时间线。
 - 折角使用 PostgreSQL 部分唯一索引，只约束未删除记录。
 - 完成感受使用 `completion_round` 区分多次读完整本书。
-- 书目和痕迹使用 `version` 防止多端写入覆盖。
+- 书目和痕迹使用 `version` 防止多端写入覆盖；回滚接口同样以 `version` 做并发校验。
+- 痕迹快照链与实体版本一一对应：实体每递增一次版本，必须恰好追加一条快照。
 - 所有查询强制带 `userId` 条件，越权资源统一返回 404。
 
 ## 常用命令

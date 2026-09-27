@@ -7,6 +7,7 @@ import { AppError, zodFields } from '../../lib/errors.js';
 import { currentUser, requireAuth } from '../../lib/auth.js';
 import { normalizeMoodTags, normalizeText, validateStatusTransition } from '../../lib/domain.js';
 import { writeEvent } from '../../lib/events.js';
+import { annotationState, appendSnapshot, dogEarState, rereadMarkState } from '../../lib/snapshots.js';
 import { paginationFromQuery, parseId } from '../../lib/http.js';
 
 const nullableText = (max: number) =>
@@ -452,6 +453,7 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
     const bookId = parseId((request.params as { bookId: string }).bookId, 'bookId');
     const userId = currentUser(request).id;
     await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM books WHERE id = ${bookId}::uuid AND user_id = ${userId}::uuid FOR UPDATE`;
       const book = await tx.book.findFirst({ where: { id: bookId, userId, deletedAt: null } });
       if (!book) throw new AppError(404, 'NOT_FOUND', '书目不存在');
       const existingVersion = (request.body as { version?: number } | undefined)?.version;
@@ -459,10 +461,17 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         throw new AppError(409, 'STALE_WRITE', '书目已在其他位置被修改，请刷新后重试');
       }
       const now = new Date();
+      // 级联会提升痕迹版本号，先锁定并读出完整状态，才能为每条痕迹追加连续快照。
       const [dogEars, annotations, rereadMarks, reflections] = await Promise.all([
-        tx.dogEar.findMany({ where: { bookId, deletedAt: null }, select: { id: true } }),
-        tx.annotation.findMany({ where: { bookId, deletedAt: null }, select: { id: true } }),
-        tx.rereadMark.findMany({ where: { bookId, deletedAt: null }, select: { id: true } }),
+        tx.$queryRaw<Array<{ id: string; version: number; pageNumber: number; reason: string | null; deletedAt: Date | null }>>`
+          SELECT id, version, page_number AS "pageNumber", reason, deleted_at AS "deletedAt"
+          FROM dog_ears WHERE book_id = ${bookId}::uuid AND deleted_at IS NULL FOR UPDATE`,
+        tx.$queryRaw<Array<{ id: string; version: number; startPage: number; endPage: number; content: string; deletedAt: Date | null }>>`
+          SELECT id, version, start_page AS "startPage", end_page AS "endPage", content, deleted_at AS "deletedAt"
+          FROM annotations WHERE book_id = ${bookId}::uuid AND deleted_at IS NULL FOR UPDATE`,
+        tx.$queryRaw<Array<{ id: string; version: number; pageNumber: number; reason: string | null; deletedAt: Date | null }>>`
+          SELECT id, version, page_number AS "pageNumber", reason, deleted_at AS "deletedAt"
+          FROM reread_marks WHERE book_id = ${bookId}::uuid AND deleted_at IS NULL FOR UPDATE`,
         tx.completionReflection.findMany({ where: { bookId, deletedAt: null }, select: { id: true } })
       ]);
       await Promise.all([
@@ -475,6 +484,39 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         where: { id: bookId },
         data: { deletedAt: now, version: { increment: 1 } }
       });
+      for (const item of dogEars) {
+        await appendSnapshot(tx, {
+          userId,
+          bookId,
+          entityType: 'DOG_EAR',
+          entityId: item.id,
+          version: item.version + 1,
+          prevState: dogEarState(item),
+          nextState: { ...dogEarState(item), deletedAt: now.toISOString() }
+        });
+      }
+      for (const item of annotations) {
+        await appendSnapshot(tx, {
+          userId,
+          bookId,
+          entityType: 'ANNOTATION',
+          entityId: item.id,
+          version: item.version + 1,
+          prevState: annotationState(item),
+          nextState: { ...annotationState(item), deletedAt: now.toISOString() }
+        });
+      }
+      for (const item of rereadMarks) {
+        await appendSnapshot(tx, {
+          userId,
+          bookId,
+          entityType: 'REREAD_MARK',
+          entityId: item.id,
+          version: item.version + 1,
+          prevState: rereadMarkState(item),
+          nextState: { ...rereadMarkState(item), deletedAt: now.toISOString() }
+        });
+      }
       await writeEvent(tx, {
         userId,
         bookId,

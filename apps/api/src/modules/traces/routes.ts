@@ -7,6 +7,7 @@ import { AppError, zodFields } from '../../lib/errors.js';
 import { currentUser, requireAuth } from '../../lib/auth.js';
 import { isRestoreWindowOpen, normalizeText, validatePageRange, validateSinglePage } from '../../lib/domain.js';
 import { writeEvent } from '../../lib/events.js';
+import { annotationState, appendSnapshot, dogEarState, rereadMarkState } from '../../lib/snapshots.js';
 import { optionalDate, paginationFromQuery, parseId } from '../../lib/http.js';
 
 const optionalReason = (max: number) =>
@@ -214,6 +215,15 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         const created = await tx.dogEar.create({
           data: { userId, bookId, pageNumber: parsed.data.pageNumber, reason }
         });
+        await appendSnapshot(tx, {
+          userId,
+          bookId,
+          entityType: 'DOG_EAR',
+          entityId: created.id,
+          version: created.version,
+          prevState: null,
+          nextState: dogEarState(created)
+        });
         await writeEvent(tx, {
           userId,
           bookId,
@@ -268,6 +278,16 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         }
       });
       if (result.count !== 1) throw new AppError(409, 'STALE_WRITE', '折角已在其他位置被修改');
+      const updated = await tx.dogEar.findUniqueOrThrow({ where: { id } });
+      await appendSnapshot(tx, {
+        userId,
+        bookId: existing.bookId,
+        entityType: 'DOG_EAR',
+        entityId: id,
+        version: updated.version,
+        prevState: dogEarState(existing),
+        nextState: dogEarState(updated)
+      });
       await writeEvent(tx, {
         userId,
         bookId: existing.bookId,
@@ -276,7 +296,7 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         action: 'UPDATED',
         payload: { pageNumber: nextPage, reason: eventSummary(nextReason) }
       });
-      return tx.dogEar.findUniqueOrThrow({ where: { id } });
+      return updated;
     });
     return { dogEar: serializeDogEar(updated) };
   });
@@ -290,11 +310,21 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
     if (!existing) throw new AppError(404, 'NOT_FOUND', '折角不存在');
     assertVersion(existing.version, parsed.data?.version);
     await prisma.$transaction(async (tx) => {
+      const now = new Date();
       const result = await tx.dogEar.updateMany({
         where: { id, userId, deletedAt: null, version: existing.version },
-        data: { deletedAt: new Date(), version: { increment: 1 } }
+        data: { deletedAt: now, version: { increment: 1 } }
       });
       if (result.count !== 1) throw new AppError(409, 'STALE_WRITE', '折角已在其他位置被修改');
+      await appendSnapshot(tx, {
+        userId,
+        bookId: existing.bookId,
+        entityType: 'DOG_EAR',
+        entityId: id,
+        version: existing.version + 1,
+        prevState: dogEarState(existing),
+        nextState: { ...dogEarState(existing), deletedAt: now.toISOString() }
+      });
       await writeEvent(tx, {
         userId,
         bookId: existing.bookId,
@@ -321,9 +351,20 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
     });
     if (duplicate) throw new AppError(409, 'DOG_EAR_EXISTS', '该页已有有效折角，无法恢复');
     const restored = await prisma.$transaction(async (tx) => {
-      const value = await tx.dogEar.update({
-        where: { id },
+      const result = await tx.dogEar.updateMany({
+        where: { id, version: existing.version, deletedAt: { not: null } },
         data: { deletedAt: null, version: { increment: 1 } }
+      });
+      if (result.count !== 1) throw new AppError(409, 'STALE_WRITE', '折角已在其他位置被修改');
+      const value = await tx.dogEar.findUniqueOrThrow({ where: { id } });
+      await appendSnapshot(tx, {
+        userId,
+        bookId: value.bookId,
+        entityType: 'DOG_EAR',
+        entityId: id,
+        version: value.version,
+        prevState: dogEarState(existing),
+        nextState: dogEarState(value)
       });
       await writeEvent(tx, {
         userId,
@@ -355,6 +396,15 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
           endPage: parsed.data.endPage,
           content: normalizeText(parsed.data.content)
         }
+      });
+      await appendSnapshot(tx, {
+        userId,
+        bookId,
+        entityType: 'ANNOTATION',
+        entityId: created.id,
+        version: created.version,
+        prevState: null,
+        nextState: annotationState(created)
       });
       await writeEvent(tx, {
         userId,
@@ -394,6 +444,16 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         }
       });
       if (result.count !== 1) throw new AppError(409, 'STALE_WRITE', '批注已在其他位置被修改');
+      const updated = await tx.annotation.findUniqueOrThrow({ where: { id } });
+      await appendSnapshot(tx, {
+        userId,
+        bookId: existing.bookId,
+        entityType: 'ANNOTATION',
+        entityId: id,
+        version: updated.version,
+        prevState: annotationState(existing),
+        nextState: annotationState(updated)
+      });
       await writeEvent(tx, {
         userId,
         bookId: existing.bookId,
@@ -402,7 +462,7 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         action: 'UPDATED',
         payload: { startPage, endPage }
       });
-      return tx.annotation.findUniqueOrThrow({ where: { id } });
+      return updated;
     });
     return { annotation: serializeAnnotation(updated) };
   });
@@ -416,11 +476,21 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
     if (!existing) throw new AppError(404, 'NOT_FOUND', '批注不存在');
     assertVersion(existing.version, parsed.data?.version);
     await prisma.$transaction(async (tx) => {
+      const now = new Date();
       const result = await tx.annotation.updateMany({
         where: { id, userId, deletedAt: null, version: existing.version },
-        data: { deletedAt: new Date(), version: { increment: 1 } }
+        data: { deletedAt: now, version: { increment: 1 } }
       });
       if (result.count !== 1) throw new AppError(409, 'STALE_WRITE', '批注已在其他位置被修改');
+      await appendSnapshot(tx, {
+        userId,
+        bookId: existing.bookId,
+        entityType: 'ANNOTATION',
+        entityId: id,
+        version: existing.version + 1,
+        prevState: annotationState(existing),
+        nextState: { ...annotationState(existing), deletedAt: now.toISOString() }
+      });
       await writeEvent(tx, {
         userId,
         bookId: existing.bookId,
@@ -443,9 +513,20 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
     }
     if (existing.book.deletedAt) throw new AppError(409, 'BOOK_DELETED', '所属书目已删除');
     const restored = await prisma.$transaction(async (tx) => {
-      const value = await tx.annotation.update({
-        where: { id },
+      const result = await tx.annotation.updateMany({
+        where: { id, version: existing.version, deletedAt: { not: null } },
         data: { deletedAt: null, version: { increment: 1 } }
+      });
+      if (result.count !== 1) throw new AppError(409, 'STALE_WRITE', '批注已在其他位置被修改');
+      const value = await tx.annotation.findUniqueOrThrow({ where: { id } });
+      await appendSnapshot(tx, {
+        userId,
+        bookId: value.bookId,
+        entityType: 'ANNOTATION',
+        entityId: id,
+        version: value.version,
+        prevState: annotationState(existing),
+        nextState: annotationState(value)
       });
       await writeEvent(tx, {
         userId,
@@ -476,6 +557,15 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
           pageNumber: parsed.data.pageNumber,
           reason: parsed.data.reason ? normalizeText(parsed.data.reason) : null
         }
+      });
+      await appendSnapshot(tx, {
+        userId,
+        bookId,
+        entityType: 'REREAD_MARK',
+        entityId: created.id,
+        version: created.version,
+        prevState: null,
+        nextState: rereadMarkState(created)
       });
       await writeEvent(tx, {
         userId,
@@ -515,6 +605,16 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         data: { pageNumber, reason, version: { increment: 1 } }
       });
       if (result.count !== 1) throw new AppError(409, 'STALE_WRITE', '重读记录已在其他位置被修改');
+      const updated = await tx.rereadMark.findUniqueOrThrow({ where: { id } });
+      await appendSnapshot(tx, {
+        userId,
+        bookId: existing.bookId,
+        entityType: 'REREAD_MARK',
+        entityId: id,
+        version: updated.version,
+        prevState: rereadMarkState(existing),
+        nextState: rereadMarkState(updated)
+      });
       await writeEvent(tx, {
         userId,
         bookId: existing.bookId,
@@ -523,7 +623,7 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         action: 'UPDATED',
         payload: { pageNumber, reason: eventSummary(reason) }
       });
-      return tx.rereadMark.findUniqueOrThrow({ where: { id } });
+      return updated;
     });
     return { rereadMark: serializeRereadMark(updated) };
   });
@@ -537,11 +637,21 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
     if (!existing) throw new AppError(404, 'NOT_FOUND', '重读记录不存在');
     assertVersion(existing.version, parsed.data?.version);
     await prisma.$transaction(async (tx) => {
+      const now = new Date();
       const result = await tx.rereadMark.updateMany({
         where: { id, userId, deletedAt: null, version: existing.version },
-        data: { deletedAt: new Date(), version: { increment: 1 } }
+        data: { deletedAt: now, version: { increment: 1 } }
       });
       if (result.count !== 1) throw new AppError(409, 'STALE_WRITE', '重读记录已在其他位置被修改');
+      await appendSnapshot(tx, {
+        userId,
+        bookId: existing.bookId,
+        entityType: 'REREAD_MARK',
+        entityId: id,
+        version: existing.version + 1,
+        prevState: rereadMarkState(existing),
+        nextState: { ...rereadMarkState(existing), deletedAt: now.toISOString() }
+      });
       await writeEvent(tx, {
         userId,
         bookId: existing.bookId,
@@ -564,9 +674,20 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
     }
     if (existing.book.deletedAt) throw new AppError(409, 'BOOK_DELETED', '所属书目已删除');
     const restored = await prisma.$transaction(async (tx) => {
-      const value = await tx.rereadMark.update({
-        where: { id },
+      const result = await tx.rereadMark.updateMany({
+        where: { id, version: existing.version, deletedAt: { not: null } },
         data: { deletedAt: null, version: { increment: 1 } }
+      });
+      if (result.count !== 1) throw new AppError(409, 'STALE_WRITE', '重读记录已在其他位置被修改');
+      const value = await tx.rereadMark.findUniqueOrThrow({ where: { id } });
+      await appendSnapshot(tx, {
+        userId,
+        bookId: value.bookId,
+        entityType: 'REREAD_MARK',
+        entityId: id,
+        version: value.version,
+        prevState: rereadMarkState(existing),
+        nextState: rereadMarkState(value)
       });
       await writeEvent(tx, {
         userId,

@@ -131,7 +131,8 @@ export const ACTION_LABELS: Record<ActivityAction, string> = {
   DELETED: '删除',
   RESTORED: '恢复',
   STATUS_CHANGED: '状态变化',
-  COMPLETED: '读完'
+  COMPLETED: '读完',
+  ROLLED_BACK: '回滚'
 };
 
 export const ENTITY_LABELS: Record<ActivityEntityType, string> = {
